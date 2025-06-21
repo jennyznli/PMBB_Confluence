@@ -1,0 +1,141 @@
+#!/bin/bash
+#BSUB -J "merge_plink_all_chr"
+#BSUB -o log/grafanc_merge_all_chr.%J.out
+#BSUB -e log/grafanc_merge_all_chr.%J.err
+#BSUB -n 16
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 2:00
+
+# Load required modules
+# module load plink/2.0
+module load plink/1.9-20210416
+
+# Set up environment
+WDIR="/home/jennyzli/breast/imputed/chr_bed"
+cd "$WDIR"
+
+echo "====== MERGING ALL PLINK CHROMOSOMES ======"
+echo "Start time: $(date)"
+echo "Working directory: $WDIR"
+
+# Create merge list for PLINK
+merge_list="merge_list.txt"
+
+# Find all chromosome bed files and create merge list
+# PLINK merge-list format: each line should have the base name (without .bed/.bim/.fam)
+ls ancestry_snps_chr*.bed | sed 's/\.bed$//' | sort -V > "$merge_list"
+
+# Count chromosomes
+chr_count=$(wc -l < "$merge_list")
+echo "Found $chr_count chromosome files to merge"
+
+# Display files to merge
+echo "Chromosome files:"
+nl "$merge_list"
+
+# Check that all required files exist
+echo ""
+echo "====== CHECKING FILE COMPLETENESS ======"
+missing_files=0
+while read -r base_name; do
+    for ext in bed bim fam; do
+        if [[ ! -f "${base_name}.${ext}" ]]; then
+            echo "ERROR: Missing ${base_name}.${ext}"
+            missing_files=$((missing_files + 1))
+        fi
+    done
+done < "$merge_list"
+
+if [[ $missing_files -gt 0 ]]; then
+    echo "ERROR: $missing_files files are missing. Cannot proceed."
+    exit 1
+fi
+
+echo "All required files present!"
+
+# Get variant counts per chromosome
+echo ""
+echo "====== VARIANT COUNTS PER CHROMOSOME ======"
+total_variants=0
+while read -r base_name; do
+    variants=$(wc -l < "${base_name}.bim")
+    total_variants=$((total_variants + variants))
+    printf "%-20s: %'8d variants\n" "$(basename $base_name)" "$variants"
+done < "$merge_list"
+
+echo ""
+printf "%-20s: %'8d variants\n" "Expected total" "$total_variants"
+
+# Output file base name
+output_base="ancestry_chr_all"
+
+echo ""
+echo "====== STARTING PLINK MERGE ======"
+echo "Output files: ${output_base}.{bed,bim,fam}"
+echo "Using 16 threads for optimal performance..."
+
+# Use the first chromosome as base, then merge the rest
+first_chr=$(head -n1 "$merge_list")
+tail -n +2 "$merge_list" > "merge_remaining.txt"
+
+echo "Base chromosome: $first_chr"
+echo "Merging $(wc -l < merge_remaining.txt) additional chromosomes..."
+
+# Perform the merge
+plink --bfile "$first_chr" \
+      --merge-list "merge_remaining.txt" \
+      --make-bed \
+      --out "$output_base" \
+      --threads 16 
+
+# Check if merge was successful
+if [[ $? -eq 0 && -f "${output_base}.bed" ]]; then
+    echo ""
+    echo "====== MERGE RESULTS ======"
+    printf "%-25s: %d\n" "Input chromosomes" "$chr_count"
+    printf "%-25s: %s\n" "Output base name" "$output_base"
+    
+    # Get final counts
+    final_variants=$(wc -l < "${output_base}.bim")
+    final_samples=$(wc -l < "${output_base}.fam")
+    
+    printf "%-25s: %'d\n" "Final variants" "$final_variants"
+    printf "%-25s: %d\n" "Final samples" "$final_samples"
+    
+    # Show file sizes
+    echo ""
+    echo "Final file sizes:"
+    ls -lh "${output_base}".{bed,bim,fam}
+    
+    # Quick validation
+    echo ""
+    echo "====== VALIDATION ======"
+    if [[ $final_variants -eq $total_variants ]]; then
+        echo "✓ Variant count matches expected total"
+    else
+        echo "⚠ Variant count differs: expected $total_variants, got $final_variants"
+        echo "  This could be due to duplicate variant filtering"
+    fi
+    
+    echo ""
+    echo "SUCCESS: All chromosomes merged successfully!"
+    
+    # Clean up temporary files
+    rm "$merge_list" "merge_remaining.txt"
+    
+else
+    echo ""
+    echo "ERROR: PLINK merge failed"
+    echo "Check the log file for details: ${output_base}.log"
+    exit 1
+fi
+
+echo ""
+echo "End time: $(date)"
+echo "====== PLINK MERGE COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# cd /home/jennyzli/breast/imputed/chr_bed
+# bsub -hl < grafanc_merge_all_chr.bsub

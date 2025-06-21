@@ -1,0 +1,94 @@
+#!/bin/bash
+#BSUB -J "vcf_to_plink[1-980]"
+#BSUB -o log/vcf_to_plink.%J_%I.out
+#BSUB -e log/vcf_to_plink.%J_%I.err
+#BSUB -n 1
+#BSUB -M 16000
+#BSUB -R "rusage[mem=8GB]"
+#BSUB -W 2:00
+
+# Set up environment
+IMPUTED_DATA_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
+WDIR="/home/jennyzli/breast"
+INPUT_VCF_DIR="/home/jennyzli/breast/imputed/chunked_vcf"
+OUTPUT_DIR="/home/jennyzli/breast/imputed/plink_chunks"
+
+cd $WDIR
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$OUTPUT_DIR"
+
+# Load required modules
+module load bcftools/1.20
+module load htslib/1.20
+
+# Get variables from input manifest file and LSB_JOBINDEX
+input_manifest="${IMPUTED_DATA_DIR}/imputed_variant_chunked_input_manifest.tsv"
+read chrid chunk start_pos stop_pos < <(awk -v i="$LSB_JOBINDEX" '$1 == i {print $2, $3, $4, $5}' "$input_manifest")
+
+# Define file paths
+input_vcf="${INPUT_VCF_DIR}/ancestry_snps_${chrid}_chunk${chunk}.vcf.gz"
+output_prefix="${OUTPUT_DIR}/ancestry_snps_${chrid}_chunk${chunk}"
+
+# INFO LOG
+echo "====== INPUT FILES ======"
+printf "%-20s: %s\n" "input_manifest" "${input_manifest}"
+printf "%-20s: %s\n" "LSB_JOBINDEX" "${LSB_JOBINDEX}"
+printf "%-20s: %s\n" "chrid" "${chrid}"
+printf "%-20s: %s\n" "chunk" "${chunk}"
+printf "%-20s: %s\n" "input_vcf" "${input_vcf}"
+
+echo "====== OUTPUT FILES ======"
+printf "%-20s: %s\n" "output_prefix" "${output_prefix}"
+
+# Check if input VCF exists
+if [[ ! -f "$input_vcf" ]]; then
+    echo "WARNING: VCF file not found: $input_vcf (may be empty chunk)"
+    exit 0
+fi
+
+# Check if VCF has variants
+variant_count=$(bcftools view -H "$input_vcf" | wc -l)
+if [[ $variant_count -eq 0 ]]; then
+    echo "INFO: No variants in $input_vcf, skipping"
+    exit 0
+fi
+
+# STEP 1: Convert VCF to PLINK format
+echo "====== STEP 1: CONVERTING VCF TO PLINK ======"
+echo "Processing chunk ${chrid}_${chunk} with $variant_count variants"
+
+plink --vcf "$input_vcf" \
+      --make-bed \
+      --out "$output_prefix" \
+      --allow-extra-chr \
+      --vcf-idspace-to _ \
+      --const-fid \
+      --vcf-require-gt
+
+# Check if conversion was successful
+if [[ -f "${output_prefix}.bed" && -f "${output_prefix}.bim" && -f "${output_prefix}.fam" ]]; then
+    echo "====== CONVERSION RESULTS ======"
+    printf "%-20s: %d\n" "input_variants" "$variant_count"
+    printf "%-20s: %s\n" "bed_file_size" "$(ls -lh ${output_prefix}.bed | awk '{print $5}')"
+    printf "%-20s: %d\n" "output_variants" "$(wc -l < ${output_prefix}.bim)"
+    printf "%-20s: %d\n" "samples" "$(wc -l < ${output_prefix}.fam)"
+    echo "SUCCESS: Converted chunk ${chrid}_${chunk} to PLINK format"
+else
+    echo "ERROR: Failed to create PLINK files"
+    exit 1
+fi
+
+echo "====== JOB COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# submit single chunk for testing:
+# bsub -hl -J "vcf_to_plink[1]" < vcf_to_plink.bsub
+
+# submit all chromosome 1 chunks:
+# bsub -hl -J "vcf_to_plink[1-75]" < vcf_to_plink.bsub
+
+# submit all chunks:
+# bsub -hl < vcf_to_plink.bsub

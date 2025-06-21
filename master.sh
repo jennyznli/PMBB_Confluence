@@ -1,0 +1,80 @@
+#!/bin/bash
+
+### SCRIPT HISTORY FOR CONFLUENCE GWAS ###
+
+### SELECT CASES/CONTROLS ###
+# in phenotype/
+# select all breast cancer individuals, subset by gender
+select_breast_cancer.sh 
+
+# select non cancer controls 
+select_non_cancer.sh 
+
+# select females with breast cancer AND without other invasive cancer
+select_confluence.sh 
+
+### IMPUTED DATA GRAFANC ANCESTRY ###
+# extracting acnestry snps from each chunk with ExtractAncSnpsFromVcfGz.pl
+nano grafanc_extract_chunks.bsub
+
+# checking size/stats of each chunk - didn't really use this 
+# grafanc_extract_chunks_check.bsub
+
+# only chr22 test first - archive 
+# grafanc_merge_chunks_chr22.bsub
+
+# for some reason chr2 and 3 chunks are the wrong order for samples, but it's just them 
+# so match the order of chr1 
+imputed/chunked_vcf/grafanc_fix_chr2_3.sh
+
+# to check order of each file, should prob make this array based to be faster 
+bcftools view ancestry_snps_chr1_chunk1.vcf.gz | grep '^#CHROM' | cut -f10- | tr '\t' '\n' | head -n 10
+
+# merge all chunks together - too large, not enough disk space
+# grafanc_merge_chunks.bsub
+
+# merge together vcf by chromosome, convert to plink to save disk space 
+grafanc_merge_chr.bsub
+
+# merge chr plink 
+grafanc_merge_all_chr.bsub 
+
+# grafanc has 282425 AncSnpPopAFs
+# merged ancestry_chr_all has 303890 snps, but 13640 have same position 
+ 
+# actually run grafanc on all
+bsub < grafanc_run.bsub
+
+### GRAFANC RESULT ANALYSIS  ###
+# for entire pmbb, compare with covar files and person self-reported race and ethnicity files
+# un grafanc_results
+grafanc_check.sh 
+
+# then check for our bresat cancer gwas speciifc cases/controls
+grafanc_check_breast.sh
+# seemed alright the ancestry inference, so we can keep going
+
+### COMMON SNPS ###
+# subset to cases and controls 
+# adds phenotype and sex data
+# check individual missingness 0.05 
+# removes ppl 3sd +/- heterozygsootiy 
+# checks relatedness- nobody related
+qc.sh
+
+# subsets genotype file into ancestry, performs preprocesing on each group by individual level  
+ancestry_ids.sh 
+
+# from now on use array jobs for each ancestry
+# perform variant level qc on each ancestry group 
+bsub < ancestry_variant_qc.bsub
+# can set cleanup to yes or no 
+
+# perform pca for each ancesetry 
+bsub < ancestry_prep_step1.bsub 
+
+# actually perform step 1 bruh 
+bsub < ancestry_step1.bsub
+
+# finally bruh
+

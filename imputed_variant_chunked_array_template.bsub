@@ -1,0 +1,65 @@
+#!/bin/bash
+#BSUB -q MY_QUEUE
+#BSUB -J "jobname[1-980]"
+#BSUB -o log/jobname.%J_%I.out
+#BSUB -e log/jobname.%J_%I.err
+#BSUB -n 1
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 8:00
+
+# load required modules
+module load plink/2.0-20240804
+
+# optionally set working directory and data directory
+IMPUTED_DATA_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
+WDIR="/path/to/working/directory"
+cd $WDIR
+# create log directory if it doesn't exist
+mkdir -p log
+
+# get variables from input manifest file and LSB_JOBINDEX
+input_manifest="${IMPUTED_DATA_DIR}/imputed_variant_chunked_input_manifest.tsv"
+read chrid chunk start_pos stop_pos < <(awk -v i="$LSB_JOBINDEX" '$1 == i {print $2, $3, $4, $5}' "$input_manifest")
+plink1_prefix="${IMPUTED_DATA_DIR}/chunked_bed_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}"
+plink2_prefix="${IMPUTED_DATA_DIR}/chunked_pgen_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}"
+vcf_file="${IMPUTED_DATA_DIR}/chunked_pVCF_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}.vcf.gz"
+
+# get number of samples
+n_expected_samples=$(wc -l < ${plink1_prefix}.fam)
+# get number of variants
+n_expected_variants=$(wc -l < ${plink1_prefix}.bim)
+
+# INFO LOG
+echo "====== INPUT FILES ======"
+printf "%-20s: %s\n" "input_manifest" "${input_manifest}"
+printf "%-20s: %s\n" "LSB_JOBINDEX" "${LSB_JOBINDEX}"
+printf "%-20s: %s\n" "chrid" "${chrid}"
+printf "%-20s: %s\n" "chunk" "${chunk}"
+printf "%-20s: %s\n" "start_pos" "${start_pos}"
+printf "%-20s: %s\n" "stop_pos" "${stop_pos}"
+printf "%-20s: %s\n" "plink1_prefix" "${plink1_prefix}"
+printf "%-20s: %s\n" "plink2_prefix" "${plink2_prefix}"
+printf "%-20s: %s\n" "vcf_file" "${vcf_file}"
+printf "%-20s: %s\n" "n_expected_samples" "${n_expected_samples}"
+printf "%-20s: %s\n" "n_expected_variants" "${n_expected_variants}"
+echo "====== OUTPUT FILES ======"
+# printf "%-20s: %s\n" "output_file" "${output_file}"
+echo "====== OUTPUT FILES ======"
+
+# STEP1: DO THE THING
+# --------------------
+echo "STEP1: DO THE THING"
+# your code here
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# submit chromosome 22 chunk5
+# bsub -hl -J "jobname[919]" < /path/to/this/script.bsub
+
+# submit all chromosome 3 chunks
+# bsub -hl -J "jobname[158-225]" < /path/to/this/script.bsub
+
+# submit all chunks
+# bsub -hl -J "jobname[1-980]" < /path/to/this/script.bsub # OR
+# bsub -hl < /path/to/this/script.bsub # no need to define new jobname index range if using all

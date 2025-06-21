@@ -1,0 +1,219 @@
+#!/bin/bash
+#BSUB -J ancestry_qc[1-8]
+#BSUB -o log/ancestry_qc.%J.%I.out
+#BSUB -e log/ancestry_qc.%J.%I.err
+#BSUB -n 8
+#BSUB -M 20GB
+#BSUB -R "rusage[mem=20GB]"
+#BSUB -W 02:00
+
+module load plink/2.0
+module load plink/1.9-20210416
+
+# INDIVIDUAL LEVEL QC FOR STRATIFIED ANCESTRY ANALYSIS
+
+# Set base directories
+BASE_DIR="/project/knathans_tecac/jenny/breast"
+ANCESTRY_BASE_DIR="${BASE_DIR}/ancestry"
+
+# Define ancestry groups in order
+ancestry_groups=("AFR" "MEN" "EUR" "SAS" "EAS" "AMR" "OCN" "MIX")
+
+# Get the specific ancestry group for this array index
+ancestry_group="${ancestry_groups[$((LSB_JOBINDEX-1))]}"
+ANCESTRY_DIR="${BASE_DIR}/${ancestry_group}"
+sample_file="${ANCESTRY_BASE_DIR}/${ancestry_group}_pids.txt"
+
+echo "========================================="
+echo "Array job $LSB_JOBINDEX processing: $ancestry_group"
+echo "Working directory: $ANCESTRY_DIR"
+echo "Sample file: $sample_file"
+echo "========================================="
+
+# Check if sample file exists
+if [[ ! -f "$sample_file" ]]; then
+    echo "ERROR: Sample file not found: $sample_file"
+    echo "Available files in $ANCESTRY_DIR:"
+    ls -la "$ANCESTRY_DIR/" 2>/dev/null || echo "Directory not found"
+    exit 1
+fi
+
+# Create QC subdirectory within ancestry group
+QC_DIR="${ANCESTRY_DIR}/common_snps"
+mkdir -p "$QC_DIR"
+
+# Change to QC directory for all operations
+cd "$QC_DIR"
+
+# Create summary log file
+LOG_FILE="${QC_DIR}/${ancestry_group}_qc_summary.txt"
+echo "=== QC SUMMARY FOR $ancestry_group ANCESTRY ===" > "$LOG_FILE"
+echo "Started: $(date)" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+### Step 1: Subset to ancestry ###
+echo "Step 1: Subsetting to ancestry group $ancestry_group..."
+echo "Step 1: Subsetting to ancestry" >> "$LOG_FILE"
+plink --bfile "${BASE_DIR}/common_snps/clean-breast-all" \
+      --keep "$sample_file" \
+      --make-bed \
+      --out "${ancestry_group}_raw"
+
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: Failed to subset data for $ancestry_group"
+    exit 1
+fi
+
+# Get initial counts
+initial_snps=$(wc -l < "${ancestry_group}_raw.bim")
+initial_samples=$(wc -l < "${ancestry_group}_raw.fam")
+echo "  Initial: $initial_snps SNPs, $initial_samples samples"
+echo "  Initial: $initial_snps SNPs, $initial_samples samples" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+### Step 2: Test for differential missingness between cases and controls ###
+echo "Step 2: Testing differential missingness..."
+echo "Step 2: Differential missingness filter" >> "$LOG_FILE"
+plink --bfile "${ancestry_group}_raw" \
+      --test-missing \
+      --out "${ancestry_group}_raw"
+
+# Extract SNPs with differential missingness p < 1e-5
+awk '$5 < 1e-5 {print $2}' "${ancestry_group}_raw.missing" > "fail_diffmiss_qc.txt"
+diffmiss_count=$(wc -l < "fail_diffmiss_qc.txt")
+echo "  Found $diffmiss_count SNPs with differential missingness p < 1e-5"
+echo "  SNPs with differential missingness p < 1e-5: $diffmiss_count" >> "$LOG_FILE"
+
+# Remove SNPs with differential missingness (if any found)
+if [[ -s "fail_diffmiss_qc.txt" ]]; then
+    echo "  Removing SNPs with differential missingness..."
+    plink --bfile "${ancestry_group}_raw" \
+          --exclude "fail_diffmiss_qc.txt" \
+          --make-bed \
+          --out "${ancestry_group}_diffmiss"
+else
+    echo "  No SNPs with differential missingness, copying files..."
+    cp "${ancestry_group}_raw.bed" "${ancestry_group}_diffmiss.bed"
+    cp "${ancestry_group}_raw.bim" "${ancestry_group}_diffmiss.bim"
+    cp "${ancestry_group}_raw.fam" "${ancestry_group}_diffmiss.fam"
+fi
+
+# Get counts after differential missingness filter
+step2_snps=$(wc -l < "${ancestry_group}_diffmiss.bim")
+step2_removed=$((initial_snps - step2_snps))
+echo "  After differential missingness: $step2_snps SNPs (removed: $step2_removed)"
+echo "  After differential missingness: $step2_snps SNPs (removed: $step2_removed)" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+### Step 3: Apply MAF filter (>0.05) ###
+echo "Step 3: Applying MAF filter (>0.05)..."
+echo "Step 3: MAF filter (>0.05)" >> "$LOG_FILE"
+plink --bfile "${ancestry_group}_diffmiss" \
+      --maf 0.05 \
+      --make-bed \
+      --out "${ancestry_group}_diffmiss_maf"
+
+# Get counts after MAF filter
+step3_snps=$(wc -l < "${ancestry_group}_diffmiss_maf.bim")
+step3_removed=$((step2_snps - step3_snps))
+echo "  After MAF filter: $step3_snps SNPs (removed: $step3_removed)"
+echo "  After MAF filter: $step3_snps SNPs (removed: $step3_removed)" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+### Step 4: Apply genotyping rate filter (<0.05 missingness) ###
+echo "Step 4: Applying genotyping rate filter (<0.05 missingness)..."
+echo "Step 4: Genotyping rate filter (<0.05 missingness)" >> "$LOG_FILE"
+plink --bfile "${ancestry_group}_diffmiss_maf" \
+      --geno 0.05 \
+      --make-bed \
+      --out "${ancestry_group}_diffmiss_maf_geno"
+
+# Get counts after genotyping rate filter
+step4_snps=$(wc -l < "${ancestry_group}_diffmiss_maf_geno.bim")
+step4_removed=$((step3_snps - step4_snps))
+echo "  After genotyping rate filter: $step4_snps SNPs (removed: $step4_removed)"
+echo "  After genotyping rate filter: $step4_snps SNPs (removed: $step4_removed)" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+### Step 5: Apply HWE filter ###
+echo "Step 5: Applying HWE filter (p > 1e-6)..."
+echo "Step 5: HWE filter (p > 1e-6)" >> "$LOG_FILE"
+plink --bfile "${ancestry_group}_diffmiss_maf_geno" \
+      --hwe 1e-6 \
+      --make-bed \
+      --out "${ancestry_group}_qc"
+
+# Get final counts
+final_snps=$(wc -l < "${ancestry_group}_qc.bim")
+final_samples=$(wc -l < "${ancestry_group}_qc.fam")
+step5_removed=$((step4_snps - final_snps))
+total_removed=$((initial_snps - final_snps))
+
+echo "  After HWE filter: $final_snps SNPs (removed: $step5_removed)"
+echo "  After HWE filter: $final_snps SNPs (removed: $step5_removed)" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+### Final Summary ###
+echo "========================================="
+echo "QC COMPLETE for $ancestry_group"
+echo "========================================="
+echo "Initial:              $initial_snps SNPs, $initial_samples samples"
+echo "After diff missingness: $step2_snps SNPs (removed: $step2_removed)"
+echo "After MAF filter:       $step3_snps SNPs (removed: $step3_removed)"
+echo "After geno rate filter: $step4_snps SNPs (removed: $step4_removed)"
+echo "After HWE filter:       $final_snps SNPs (removed: $step5_removed)"
+echo "========================================="
+echo "TOTAL REMOVED:          $total_removed SNPs"
+echo "FINAL DATASET:          $final_snps SNPs, $final_samples samples"
+echo "========================================="
+
+# Write final summary to log
+echo "=== FINAL SUMMARY ===" >> "$LOG_FILE"
+echo "Initial:                $initial_snps SNPs, $initial_samples samples" >> "$LOG_FILE"
+echo "After diff missingness: $step2_snps SNPs (removed: $step2_removed)" >> "$LOG_FILE"
+echo "After MAF filter:       $step3_snps SNPs (removed: $step3_removed)" >> "$LOG_FILE"
+echo "After geno rate filter: $step4_snps SNPs (removed: $step4_removed)" >> "$LOG_FILE"
+echo "After HWE filter:       $final_snps SNPs (removed: $step5_removed)" >> "$LOG_FILE"
+echo "TOTAL REMOVED:          $total_removed SNPs" >> "$LOG_FILE"
+echo "FINAL DATASET:          $final_snps SNPs, $final_samples samples" >> "$LOG_FILE"
+echo "Completed: $(date)" >> "$LOG_FILE"
+
+# Set cleanup option (change to "yes" to automatically remove intermediate files)
+CLEANUP="no"  # Change to "yes" to enable automatic cleanup
+
+echo ""
+echo "QC summary saved to: $LOG_FILE"
+echo "Final dataset: ${ancestry_group}_qc.{bed,bim,fam}"
+
+### Optional cleanup of intermediate files ###
+echo ""
+if [[ "$CLEANUP" == "yes" ]]; then
+    echo "Cleaning up intermediate files..."
+    echo "Cleaning up intermediate files..." >> "$LOG_FILE"
+    
+    # Remove intermediate PLINK files
+    rm -f "${ancestry_group}_raw.bed" "${ancestry_group}_raw.bim" "${ancestry_group}_raw.fam"
+    rm -f "${ancestry_group}_raw.log" "${ancestry_group}_raw.missing"
+    rm -f "${ancestry_group}_diffmiss.bed" "${ancestry_group}_diffmiss.bim" "${ancestry_group}_diffmiss.fam"
+    rm -f "${ancestry_group}_diffmiss.log"
+    rm -f "${ancestry_group}_diffmiss_maf.bed" "${ancestry_group}_diffmiss_maf.bim" "${ancestry_group}_diffmiss_maf.fam"
+    rm -f "${ancestry_group}_diffmiss_maf.log"
+    rm -f "${ancestry_group}_diffmiss_maf_geno.bed" "${ancestry_group}_diffmiss_maf_geno.bim" "${ancestry_group}_diffmiss_maf_geno.fam"
+    rm -f "${ancestry_group}_diffmiss_maf_geno.log"
+    rm -f "${ancestry_group}_qc.log"
+    
+    # Remove QC text files
+    rm -f "fail_diffmiss_qc.txt"
+    
+    echo "  Cleaned up intermediate files"
+    echo "  Intermediate files removed" >> "$LOG_FILE"
+    echo "  Keeping: ${ancestry_group}_qc_final.{bed,bim,fam} and ${ancestry_group}_qc_summary.txt"
+else
+    echo "Keeping all intermediate files for debugging"
+    echo "  To enable cleanup, change CLEANUP variable to 'yes' in script"
+    echo "Intermediate files retained" >> "$LOG_FILE"
+fi
+
+echo ""
+echo "QC process complete for $ancestry_group!"
+echo "Final files located in: $QC_DIR"

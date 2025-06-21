@@ -1,0 +1,99 @@
+#!/bin/bash
+#BSUB -J "grafanc_extract[1-980]"
+#BSUB -o log/grafanc_extract.%J_%I.out
+#BSUB -e log/grafanc_extract.%J_%I.err
+#BSUB -n 1
+#BSUB -M 16000
+#BSUB -R "rusage[mem=8GB]"
+#BSUB -W 2:00
+
+module load bcftools/1.20
+module load htslib/1.20
+
+# Set up environment
+IMPUTED_DATA_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
+WDIR="/home/jennyzli/breast"
+GRAFANC_DIR="/home/jennyzli/grafanc"
+OUTPUT_DIR="/home/jennyzli/breast/imputed/chunked_vcf"
+
+cd $WDIR
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$OUTPUT_DIR"
+
+# Get variables from input manifest file and LSB_JOBINDEX (following template exactly)
+input_manifest="${IMPUTED_DATA_DIR}/imputed_variant_chunked_input_manifest.tsv"
+read chrid chunk start_pos stop_pos < <(awk -v i="$LSB_JOBINDEX" '$1 == i {print $2, $3, $4, $5}' "$input_manifest")
+
+# Define file paths
+vcf_file="${IMPUTED_DATA_DIR}/chunked_pVCF_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}.vcf.gz"
+output_vcf="${OUTPUT_DIR}/ancestry_snps_${chrid}_chunk${chunk}.vcf.gz"
+temp_vcf="${OUTPUT_DIR}/temp_ancestry_snps_${chrid}_chunk${chunk}.vcf"
+
+# INFO LOG (following template pattern)
+echo "====== INPUT FILES ======"
+printf "%-20s: %s\n" "input_manifest" "${input_manifest}"
+printf "%-20s: %s\n" "LSB_JOBINDEX" "${LSB_JOBINDEX}"
+printf "%-20s: %s\n" "chrid" "${chrid}"
+printf "%-20s: %s\n" "chunk" "${chunk}"
+printf "%-20s: %s\n" "start_pos" "${start_pos}"
+printf "%-20s: %s\n" "stop_pos" "${stop_pos}"
+printf "%-20s: %s\n" "vcf_file" "${vcf_file}"
+
+echo "====== OUTPUT FILES ======"
+printf "%-20s: %s\n" "output_vcf" "${output_vcf}"
+
+# Check if input VCF exists
+if [[ ! -f "$vcf_file" ]]; then
+    echo "ERROR: VCF file not found: $vcf_file"
+    exit 1
+fi
+
+# STEP 1: Extract ancestry SNPs from this chunk
+echo "====== STEP 1: EXTRACTING ANCESTRY SNPS ======"
+echo "Processing chunk ${chrid}_${chunk} (${start_pos}-${stop_pos})"
+
+# Run GRAF-ANC extraction (no keyword = single chunk only)
+perl ${GRAFANC_DIR}/perl/ExtractAncSnpsFromVcfGz.pl \
+    "$vcf_file" \
+    "$temp_vcf"
+
+# Check if extraction was successful
+if [[ -f "$temp_vcf" ]]; then
+    variant_count=$(grep -v '^#' "$temp_vcf" 2>/dev/null | wc -l)
+    
+    if [[ $variant_count -gt 0 ]]; then
+        # Compress and index the output using bcftools
+        bcftools view -O z -o "$output_vcf" "$temp_vcf"
+        tabix -p vcf "$output_vcf"
+        
+        # Remove temporary uncompressed file
+        rm "$temp_vcf"
+        
+        echo "====== EXTRACTION RESULTS ======"
+        printf "%-20s: %d\n" "variants_extracted" "$variant_count"
+        printf "%-20s: %s\n" "output_file_size" "$(ls -lh $output_vcf | awk '{print $5}')"
+        echo "SUCCESS: Found $variant_count ancestry SNPs in chunk ${chrid}_${chunk}"
+    else
+        echo "INFO: No ancestry SNPs found in chunk ${chrid}_${chunk}"
+        # Remove empty temp file
+        rm -f "$temp_vcf"
+    fi
+else
+    echo "ERROR: Failed to create output file"
+    exit 1
+fi
+
+echo "====== JOB COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# submit single chunk for testing:
+# bsub -hl -J "grafanc_extract[1]" < grafanc_extract_chunks.bsub
+
+# submit all chromosome 1 chunks:
+# bsub -hl -J "grafanc_extract[1-75]" < grafanc_extract_chunks.bsub
+
+# submit all chunks:
+# bsub -hl < grafanc_extract_chunks.bsub

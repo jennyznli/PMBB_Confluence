@@ -1,0 +1,128 @@
+#!/bin/bash
+#BSUB -J "grafanc_analysis"
+#BSUB -o log/grafanc_analysis.%J.out
+#BSUB -e log/grafanc_analysis.%J.err
+#BSUB -n 16
+#BSUB -M 64000
+#BSUB -R "rusage[mem=32GB]"
+#BSUB -W 8:00
+
+module load htslib/1.9
+
+# Set up environment
+WDIR="/home/jennyzli/breast"
+OUTPUT_DIR="/home/jennyzli/breast/imputed/chr_bed"
+GRAFANC_DIR="/home/jennyzli/grafanc"
+
+cd $WDIR
+
+# Create directories
+mkdir -p log
+mkdir -p grafanc_results
+
+threads=16
+
+echo "====== GRAF-ANC ANCESTRY ANALYSIS ======"
+echo "Start time: $(date)"
+
+# Input and output files
+plink_prefix="${OUTPUT_DIR}/ancestry_chr_all"
+grafanc_output="${WDIR}/grafanc_results/all_pmbb_ancestry_pops.txt"
+
+echo "====== INPUT FILE VERIFICATION ======"
+
+# Check if PLINK files exist
+required_files=("${plink_prefix}.bed" "${plink_prefix}.bim" "${plink_prefix}.fam")
+all_files_exist=true
+
+for file in "${required_files[@]}"; do
+    if [[ -f "$file" ]]; then
+        size=$(ls -lh "$file" | awk '{print $5}')
+        printf "%-20s: ✓ Found (%s)\n" "$(basename $file)" "$size"
+    else
+        printf "%-20s: ✗ Missing\n" "$(basename $file)"
+        all_files_exist=false
+    fi
+done
+
+# Get dataset dimensions
+plink_variants=$(wc -l < "${plink_prefix}.bim")
+plink_samples=$(wc -l < "${plink_prefix}.fam")
+
+printf "%-20s: %d\n" "Variants" "$plink_variants"
+printf "%-20s: %d\n" "Samples" "$plink_samples"
+
+echo ""
+echo "====== RUNNING GRAF-ANC ANALYSIS ======"
+
+# Check if GRAF-ANC executable exists
+if [[ ! -f "${GRAFANC_DIR}/cpp/grafanc" ]]; then
+    echo "ERROR: GRAF-ANC executable not found at ${GRAFANC_DIR}/cpp/grafanc"
+    echo "Available files in GRAF-ANC directory:"
+    ls -la "$GRAFANC_DIR/"
+    exit 1
+fi
+
+# Remove existing output file if it exists
+if [[ -f "$grafanc_output" ]]; then
+    echo "Removing existing output file: $grafanc_output"
+    rm "$grafanc_output"
+fi
+
+echo ""
+echo "Starting GRAF-ANC analysis..."
+echo "Command: ${GRAFANC_DIR}/cpp/grafanc $plink_prefix $grafanc_output --threads $threads"
+
+# Record start time
+analysis_start=$(date +%s)
+
+# Run GRAF-ANC with optimized parameters
+${GRAFANC_DIR}/cpp/grafanc "$plink_prefix" "$grafanc_output" \
+    --threads $threads 
+
+# Record end time and calculate duration
+analysis_end=$(date +%s)
+analysis_duration=$(( analysis_end - analysis_start ))
+analysis_duration_min=$(( analysis_duration / 60 ))
+
+echo ""
+echo "GRAF-ANC analysis completed in ${analysis_duration_min} minutes (${analysis_duration} seconds)"
+
+# Check if GRAF-ANC completed successfully
+grafanc_exit_status=$?
+
+if [[ $grafanc_exit_status -ne 0 ]]; then
+    echo "ERROR: GRAF-ANC analysis failed with exit code: $grafanc_exit_status"
+    echo "Check the log file for detailed error messages"
+    exit 1
+fi
+
+echo ""
+echo "====== RESULTS ANALYSIS ======"
+
+if [[ ! -f "$grafanc_output" ]]; then
+    echo "ERROR: Output file was not created: $grafanc_output"
+    exit 1
+fi
+
+# Basic file info
+printf "%-20s: %s\n" "Output file" "$grafanc_output"
+printf "%-20s: %s\n" "File size" "$(ls -lh $grafanc_output | awk '{print $5}')"
+
+result_lines=$(wc -l < "$grafanc_output")
+printf "%-20s: %d\n" "Total lines" "$result_lines"
+
+echo ""
+echo "====== ANALYSIS COMPLETE ======"
+echo "✓ GRAF-ANC ancestry analysis completed successfully"
+echo ""
+echo "Output files:"
+printf "  %-20s: %s\n" "Population results" "$grafanc_output"
+printf "  %-20s: %s\n" "Analysis log" "log/grafanc_analysis.*"
+
+echo "====== GRAF-ANC ANALYSIS COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# Run this AFTER VCF to PLINK conversion completes:
+# bsub < grafanc_run.bsub

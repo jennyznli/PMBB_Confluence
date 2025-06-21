@@ -1,0 +1,122 @@
+#!/bin/bash
+#BSUB -J "grafanc_merge_chr[1-22]"
+#BSUB -o log/grafanc_merge_chr.%J_%I.out
+#BSUB -e log/grafanc_merge_chr.%J_%I.err
+#BSUB -n 16
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 2:00
+
+# Load required modules
+module load bcftools/1.20
+module load htslib/1.20
+module load plink/1.9-20210416
+
+# Set up environment
+WDIR="/home/jennyzli/breast"
+OUTPUT_DIR="/home/jennyzli/breast/imputed/chunked_vcf"
+MERGED_DIR="/home/jennyzli/breast/imputed/merged_by_chr"
+
+cd $WDIR
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$MERGED_DIR"
+
+# Get chromosome number from LSB_JOBINDEX
+CHR=$LSB_JOBINDEX
+
+echo "====== MERGING CHROMOSOME $CHR ANCESTRY SNP CHUNKS ======"
+echo "Start time: $(date)"
+
+# Create file list for this chromosome
+vcf_list_file="${MERGED_DIR}/chr${CHR}_vcf_files.txt"
+ls "${OUTPUT_DIR}"/ancestry_snps_chr${CHR}_*.vcf.gz 2>/dev/null | sort -V > "$vcf_list_file"
+
+# Check if we found any files for this chromosome
+if [[ ! -s "$vcf_list_file" ]]; then
+    echo "WARNING: No chunk files found for chromosome $CHR"
+    echo "Pattern: ${OUTPUT_DIR}/ancestry_snps_chr${CHR}_*.vcf.gz"
+    exit 0
+fi
+
+# Count files found
+file_count=$(wc -l < "$vcf_list_file")
+echo "Found $file_count chunk files for chromosome $CHR"
+
+# Display the files we're merging
+echo "Files to merge:"
+cat "$vcf_list_file"
+
+# Output file for this chromosome
+chr_output="${MERGED_DIR}/ancestry_snps_chr${CHR}.vcf.gz"
+plink_output="${MERGED_DIR}/ancestry_snps_chr${CHR}"
+
+echo "Merging chromosome $CHR chunks..."
+
+echo "Merging chromosome $CHR chunks with -o flag..."
+bcftools concat -f "$vcf_list_file" \
+    --output "$chr_output" \
+    --output-type z \
+    --threads 16
+
+# Check if merge was successful
+if [[ $? -eq 0 && -f "$chr_output" ]]; then
+    echo "Indexing chromosome $CHR output..."
+    tabix -p vcf "$chr_output"
+    
+    echo "Converting chromosome $CHR to PLINK format..."
+    # Convert to PLINK immediately
+    plink --vcf "$chr_output" \
+          --make-bed \
+          --out "$plink_output" \
+          --threads 16
+    
+    # Check if PLINK conversion was successful
+    if [[ $? -eq 0 && -f "${plink_output}.bed" ]]; then
+        echo "PLINK conversion successful. Removing large VCF file..."
+        
+        # Remove the large VCF and index to save space
+        rm "$chr_output" "$chr_output.tbi"
+        
+        echo "====== CHROMOSOME $CHR RESULTS ======"
+        printf "%-25s: %s\n" "Chromosome" "$CHR"
+        printf "%-25s: %d\n" "Input chunks" "$file_count"
+        printf "%-25s: %s\n" "PLINK output" "${plink_output}.{bed,bim,fam}"
+        
+        # Get variant and sample counts from PLINK files
+        variant_count=$(wc -l < "${plink_output}.bim")
+        sample_count=$(wc -l < "${plink_output}.fam")
+        
+        printf "%-25s: %d\n" "Total variants" "$variant_count"
+        printf "%-25s: %d\n" "Samples" "$sample_count"
+        
+        # Show file sizes
+        echo "PLINK file sizes:"
+        ls -lh "${plink_output}".{bed,bim,fam}
+        
+        echo "SUCCESS: Chromosome $CHR converted to PLINK and VCF cleaned up"
+    else
+        echo "ERROR: PLINK conversion failed for chromosome $CHR"
+        echo "Keeping VCF file for debugging: $chr_output"
+        exit 1
+    fi
+else
+    echo "ERROR: Failed to merge chromosome $CHR"
+    exit 1
+fi
+
+
+echo "End time: $(date)"
+echo "====== CHROMOSOME $CHR MERGE COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# Run this AFTER the extraction array job completes:
+# 
+# Test single chromosome:
+# bsub -hl -J "grafanc_merge_chr[1]" < grafanc_merge_chr.bsub
+# 
+# Run all autosomes:
+# bsub -hl < grafanc_merge_chr.bsub
+

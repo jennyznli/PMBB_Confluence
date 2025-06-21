@@ -1,0 +1,143 @@
+#!/bin/bash
+#BSUB -J "grafanc_overlap[1-980]"
+#BSUB -o log/grafanc_overlap.%J_%I.out
+#BSUB -e log/grafanc_overlap.%J_%I.err
+#BSUB -n 1
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 8:00
+
+# Load required modules
+module load plink/2.0-20240804
+
+# Set directories
+IMPUTED_DATA_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
+WDIR="/home/jennyzli/breast"
+OUTPUT_DIR="/home/jennyzli/breast/imputed"
+GRAFANC_REF="/home/jennyzli/grafanc/cpp/data/AncSnpPopAFs.txt"
+
+cd $WDIR
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$OUTPUT_DIR"
+
+# Get variables from input manifest file and LSB_JOBINDEX
+input_manifest="${IMPUTED_DATA_DIR}/imputed_variant_chunked_input_manifest.tsv"
+read chrid chunk start_pos stop_pos < <(awk -v i="$LSB_JOBINDEX" '$1 == i {print $2, $3, $4, $5}' "$input_manifest")
+
+plink1_prefix="${IMPUTED_DATA_DIR}/chunked_bed_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}"
+plink2_prefix="${IMPUTED_DATA_DIR}/chunked_pgen_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}"
+
+# Output prefix for this chunk
+output_prefix="${OUTPUT_DIR}/overlap_chr${chrid}_chunk${chunk}"
+
+# Get number of samples and variants
+n_expected_samples=$(wc -l < ${plink1_prefix}.fam)
+n_expected_variants=$(wc -l < ${plink1_prefix}.bim)
+
+# INFO LOG
+echo "====== INPUT FILES ======"
+printf "%-20s: %s\n" "LSB_JOBINDEX" "${LSB_JOBINDEX}"
+printf "%-20s: %s\n" "chrid" "${chrid}"
+printf "%-20s: %s\n" "chunk" "${chunk}"
+printf "%-20s: %s\n" "start_pos" "${start_pos}"
+printf "%-20s: %s\n" "stop_pos" "${stop_pos}"
+printf "%-20s: %s\n" "plink1_prefix" "${plink1_prefix}"
+printf "%-20s: %s\n" "n_expected_samples" "${n_expected_samples}"
+printf "%-20s: %s\n" "n_expected_variants" "${n_expected_variants}"
+printf "%-20s: %s\n" "grafanc_ref" "${GRAFANC_REF}"
+echo "====== OUTPUT FILES ======"
+printf "%-20s: %s\n" "output_prefix" "${output_prefix}"
+echo "=========================="
+
+# STEP 1: Create variant list for this chromosome from GRAF-ANC reference
+echo "STEP 1: Creating variant list for chromosome ${chrid} from GRAF-ANC reference"
+
+# Handle chromosome X specifically
+if [[ "$chrid" == "23" ]]; then
+    grafanc_chr="X"
+    chr_prefix="chrX"
+else
+    grafanc_chr="$chrid"
+    chr_prefix="chr${chrid}"
+fi
+
+# Extract variants for this chromosome from GRAF-ANC reference (GRCh38 coordinates)
+awk -v chr="$grafanc_chr" -v prefix="$chr_prefix" 'NR>1 && $1==chr {
+    # Format: chr + CHR + "_" + pos_38 + "_" + ref + "_" + alt
+    print prefix "_" $3 "_" $5 "_" $6
+}' "$GRAFANC_REF" > "${output_prefix}_grafanc_variants.txt"
+
+grafanc_var_count=$(wc -l < "${output_prefix}_grafanc_variants.txt")
+echo "Found $grafanc_var_count GRAF-ANC variants for chromosome ${grafanc_chr}"
+
+if [[ $grafanc_var_count -eq 0 ]]; then
+    echo "No GRAF-ANC variants found for chromosome ${grafanc_chr}, skipping"
+    exit 0
+fi
+
+# STEP 2: Find overlapping SNPs using plink2
+echo "STEP 2: Finding overlapping SNPs with imputed data"
+
+# Use plink2 to extract only variants that overlap with GRAF-ANC
+# This creates a list of variants present in both datasets
+plink2 --pfile "${plink2_prefix}" \
+       --extract-col-cond "${output_prefix}_grafanc_variants.txt" \
+       --write-snplist \
+       --out "${output_prefix}_overlap_snplist"
+
+# Check if any overlapping variants were found
+if [[ -f "${output_prefix}_overlap_snplist.snplist" ]]; then
+    overlap_count=$(wc -l < "${output_prefix}_overlap_snplist.snplist")
+    echo "Found $overlap_count overlapping variants between imputed data and GRAF-ANC"
+    
+    if [[ $overlap_count -eq 0 ]]; then
+        echo "No overlapping variants found for chunk ${chrid}_${chunk}"
+        exit 0
+    fi
+    
+    # STEP 3: Extract overlapping variants and create plink files
+    echo "STEP 3: Extracting overlapping variants"
+    
+    plink2 --pfile "${plink2_prefix}" \
+           --extract "${output_prefix}_overlap_snplist.snplist" \
+           --make-bed \
+           --out "${output_prefix}"
+    
+    # Get final counts
+    if [[ -f "${output_prefix}.bim" ]]; then
+        final_variants=$(wc -l < "${output_prefix}.bim")
+        final_samples=$(wc -l < "${output_prefix}.fam")
+        
+        echo "====== FINAL RESULTS ======"
+        printf "%-20s: %s\n" "Chunk" "${chrid}_${chunk}"
+        printf "%-20s: %s\n" "Original variants" "${n_expected_variants}"
+        printf "%-20s: %s\n" "GRAF-ANC variants" "${grafanc_var_count}"
+        printf "%-20s: %s\n" "Overlapping variants" "${final_variants}"
+        printf "%-20s: %s\n" "Samples" "${final_samples}"
+        echo "============================"
+        
+        # Create a summary file for this chunk
+        echo -e "${chrid}\t${chunk}\t${n_expected_variants}\t${grafanc_var_count}\t${final_variants}\t${final_samples}" > "${output_prefix}_summary.txt"
+        
+    else
+        echo "ERROR: Failed to create output files for chunk ${chrid}_${chunk}"
+        exit 1
+    fi
+    
+else
+    echo "ERROR: Failed to create SNP list for chunk ${chrid}_${chunk}"
+    exit 1
+fi
+
+echo "Completed processing chunk ${chrid}_${chunk}"
+
+# Clean up intermediate files
+rm -f "${output_prefix}_grafanc_variants.txt"
+rm -f "${output_prefix}_overlap_snplist.snplist"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# Submit all chunks:
+# bsub -hl < /path/to/this/script.bsub
