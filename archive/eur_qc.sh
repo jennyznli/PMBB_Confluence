@@ -11,22 +11,23 @@ module load plink/1.9-20210416
 module load htslib/1.9
 
 set -e 
-HOME_DIR="/project/knathans_tecac/jenny/breast/common_snps"
+WDIR="/project/knathans_tecac/jenny/breast"
+HOME_DIR="/project/knathans_tecac/jenny/breast/data/common_snps"
 cd "$HOME_DIR"
 
 PMBB_DIR="/static/PMBB/PMBB-Release-2024-3.0"
 PHE_DIR="/static/PMBB/PMBB-Release-2024-3.0/Phenotypes/3.0"
 IMP_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
 COM_DIR="$IMP_DIR/common_snps_LD_pruned"
-
 PER="$PHE_DIR/PMBB-Release-2024-3.0_phenotype_person.txt"
 SNP_FILE="$COM_DIR/PMBB-Release-2024-3.0_genetic_imputed.commonsnps"
 
-# Define case/control file paths
-CASES_FILE="/project/knathans_tecac/jenny/breast/cases.txt"
-CONTROLS_FILE="/project/knathans_tecac/jenny/breast/controls.txt"
-HET_FILE="/project/knathans_tecac/jenny/breast/het.sh"
-IBD_FILE="/project/knathans_tecac/jenny/breast/ibd.sh"
+EUR_FILE="$WDIR/analysis/ancestry/EUR_breast_pids.txt"
+
+# CASES_FILE="$WDIR/data/cases.txt"
+# CONTROLS_FILE="$WDIR/data/controls.txt"
+HET_FILE="$WDIR/scripts/het.sh"
+IBD_FILE="$WDIR/scripts/ibd.sh"
 
 ### CHECK REQUIRED FILES ###
 required_files=("$PER" "$SNP_FILE.bed" "$SNP_FILE.bim" "$SNP_FILE.fam")
@@ -68,7 +69,6 @@ NR==FNR {
     next
 }
 {
-    # Update FAM file sex column (column 5)
     if ($2 in sex) {
         $5 = sex[$2]
     } else {
@@ -82,22 +82,12 @@ cp common_snps_raw.bed common_snps.bed
 ### CREATE CASE/CONTROL DATASET ###
 echo "=== CREATING CASE/CONTROL DATASET ==="
 
-# Combine cases and controls into one file
-cat "$CASES_FILE" "$CONTROLS_FILE" > case_control_all_ids.txt
-
-# Create keep file for PLINK (FID IID format)
-awk '{print 0, $1}' case_control_all.txt > case_control_all_pids.txt
-
-echo "Cases: $(wc -l < "$CASES_FILE")"
-echo "Controls: $(wc -l < "$CONTROLS_FILE")"
-echo "Total case/control samples: $(wc -l < case_control_all_pids.txt)"
-
 # Subset to only cases and controls
-plink --bfile common_snps \
-      --keep case_control_all_pids.txt \
+plink --bfile c \
+      --keep $EUR_FILE \
       --make-bed \
       --threads 16 \
-      --out breast_all
+      --out breast_eur
 
 ### UPDATE PHENOTYPE INFORMATION ###
 echo "=== UPDATING PHENOTYPE INFORMATION ==="
@@ -110,7 +100,6 @@ BEGIN {
         cases[id] = 1
     }
     close("'$CASES_FILE'")
-
     # Read controls file
     while ((getline id < "'$CONTROLS_FILE'") > 0) {
         controls[id] = 1
@@ -133,6 +122,22 @@ BEGIN {
 mv breast_all_updated.fam breast_all.fam
 
 echo "Updated phenotypes in FAM file"
+
+
+### VARIANT QC ###
+echo "=== VARIANT QC CHECKS ==="
+# maf > 0.05
+echo "Checking minor allele frequency..."
+plink --bfile breast_eur \
+      --maf 0.05 \
+      --threads 16 \
+      --out breast_eur_maf
+
+echo "Checking variant missingness..."
+plink --bfile breast_eur_maf \
+      --geno 0.05 \
+      --threads 16 \
+      --out breast_eur_maf_miss
 
 ### INDIVIDUAL QC ###
 echo "=== INDIVIDUAL QC CHECKS ==="
@@ -160,7 +165,7 @@ echo "Heterozygosity outliers: $(wc -l < fail-het.txt)"
 
 ### IBD CHECK ###
 echo "=== IBD/RELATEDNESS CHECK ==="
-echo "Computing pairwise IBD (this may take a while)..."
+echo "Computing pairwise IBD..."
 
 # Increase memory and threads for genome calculation
 plink --bfile breast_all \
@@ -177,7 +182,7 @@ echo "Related individuals to remove: $(wc -l < fail-ibd.txt)"
 echo "=== COMBINING QC FAILURES ==="
 
 # Combine all QC failures
-cat fail-missing-ind.txt fail-het.txt fail-ibd.txt > fail-qc-inds.txt
+cat fail-missing-ind.txt fail-het.txt fail-ibd.txt | sort | uniq > fail-qc-inds.txt
 
 echo "Total individuals failing QC: $(wc -l < fail-qc-inds.txt)"
 

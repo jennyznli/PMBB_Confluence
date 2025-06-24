@@ -1,7 +1,7 @@
 #!/bin/bash
 #BSUB -J ancestry_pca[1-8]
-#BSUB -o log/ancestry_pca.%J.%I.out
-#BSUB -e log/ancestry_pca.%J.%I.err
+#BSUB -o ../log/ancestry_pca.%J.%I.out
+#BSUB -e ../log/ancestry_pca.%J.%I.err
 #BSUB -n 4
 #BSUB -M 16GB
 #BSUB -R "rusage[mem=16GB]"
@@ -14,15 +14,17 @@ module load plink/1.9-20210416
 
 # Set base directories
 BASE_DIR="/project/knathans_tecac/jenny/breast"
-ANCESTRY_BASE_DIR="${BASE_DIR}/ancestry"
+ANCESTRY_BASE_DIR="${BASE_DIR}/analysis/ancestry"
 
 # Define ancestry groups in order
 ancestry_groups=("AFR" "MEN" "EUR" "SAS" "EAS" "AMR" "OCN" "MIX")
 
 # Get the specific ancestry group for this array index
 ancestry_group="${ancestry_groups[$((LSB_JOBINDEX-1))]}"
-ANCESTRY_DIR="${BASE_DIR}/${ancestry_group}"
+ANCESTRY_DIR="${BASE_DIR}/analysis/${ancestry_group}"
 QC_DIR="${ANCESTRY_DIR}/common_snps"
+STEP1_DIR="${ANCESTRY_DIR}/step1"
+mkdir -p $STEP1_DIR 
 
 echo "========================================="
 echo "Array job $LSB_JOBINDEX processing: $ancestry_group"
@@ -38,7 +40,7 @@ if [[ ! -f "${QC_FILE}.bed" ]]; then
 fi
 
 # Create PCA subdirectory
-PCA_DIR="${QC_DIR}/pca"
+PCA_DIR="${ANCESTRY_DIR}/pca"
 mkdir -p "$PCA_DIR"
 
 # Change to PCA directory for all operations
@@ -58,31 +60,11 @@ echo "Input data: $total_snps SNPs, $total_samples samples"
 echo "Input data: $total_snps SNPs, $total_samples samples" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
 
-### Step 1: LD pruning for PCA ###
-echo "Step 1: LD pruning for PCA..."
-echo "Step 1: LD pruning for PCA" >> "$LOG_FILE"
-
-plink --bfile "${QC_FILE}" \
-      --indep-pairwise 50 5 0.2 \
-      --out "${ancestry_group}_ld_pruning"
-
-if [[ $? -ne 0 ]]; then
-    echo "ERROR: LD pruning failed for $ancestry_group"
-    exit 1
-fi
-
-# Count pruned SNPs
-pruned_snps=$(wc -l < "${ancestry_group}_ld_pruning.prune.in")
-echo "  LD pruned SNPs for PCA: $pruned_snps"
-echo "  LD pruned SNPs for PCA: $pruned_snps" >> "$LOG_FILE"
-echo "" >> "$LOG_FILE"
-
-### Step 2: Run PCA ###
+### RUN PCA ###
 echo "Step 2: Running PCA (10 components)..."
 echo "Step 2: Running PCA (10 components)" >> "$LOG_FILE"
 
 plink --bfile "${QC_FILE}" \
-      --extract "${ancestry_group}_ld_pruning.prune.in" \
       --pca 10 \
       --out "${ancestry_group}_pca"
 
@@ -103,11 +85,11 @@ echo "Step 3: Creating REGENIE covariate file" >> "$LOG_FILE"
 # PLINK .eigenvec format: FID IID PC1 PC2 ... PC10
 # REGENIE format: FID IID V1 V2 ... V10
 
-echo "FID IID V1 V2 V3 V4 V5 V6 V7 V8 V9 V10" > "${ancestry_group}_covariates.txt"
-awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12}' "${ancestry_group}_pca.eigenvec" >> "${ancestry_group}_covariates.txt"
+echo "FID IID V1 V2 V3 V4 V5 V6 V7 V8 V9 V10" > "${STEP1_DIR}/${ancestry_group}_covariates.txt"
+awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12}' "${ancestry_group}_pca.eigenvec" >> "${STEP1_DIR}/${ancestry_group}_covariates.txt"
 
 # Count samples in covariate file
-cov_samples=$(tail -n +2 "${ancestry_group}_covariates.txt" | wc -l)
+cov_samples=$(tail -n +2 "${STEP1_DIR}/${ancestry_group}_covariates.txt" | wc -l)
 echo "  Covariate file created: $cov_samples samples"
 echo "  Covariate file created: $cov_samples samples" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
@@ -117,18 +99,18 @@ echo "Step 4: Creating REGENIE phenotype file..."
 echo "Step 4: Creating REGENIE phenotype file" >> "$LOG_FILE"
 
 # Need to get case-control status
-CASE_CONTROL_FILE="${BASE_DIR}/case_control.txt"
+CASE_CONTROL_FILE="${BASE_DIR}/data/case_control.txt"
 
 if [[ -f "$CASE_CONTROL_FILE" ]]; then
     echo "  Using case-control file: $CASE_CONTROL_FILE"
     echo "  Using case-control file: $CASE_CONTROL_FILE" >> "$LOG_FILE"
     
     # Create phenotype file header
-    echo "FID IID BREAST_CANCER" > "${ancestry_group}_phenotypes.txt"
+    echo "FID IID Y1" > "${STEP1_DIR}/${ancestry_group}_phenotypes.txt"
     
     # Join sample list with case-control status
     # .fam format: FID IID PAT MAT SEX PHENO
-    # Need to create: FID IID BREAST_CANCER (0=control, 1=case)
+    # Need to create: FID IID Y1 (0=control, 1=case)
     
     awk 'BEGIN {OFS=" "}
         # Read case-control status
@@ -152,13 +134,13 @@ if [[ -f "$CASE_CONTROL_FILE" ]]; then
                 print fid, iid, "NA"
             }
         }
-    ' "$CASE_CONTROL_FILE" "${QC_FILE}.fam" >> "${ancestry_group}_phenotypes.txt"
+    ' "$CASE_CONTROL_FILE" "${QC_FILE}.fam" >> "${STEP1_DIR}/${ancestry_group}_phenotypes.txt"
     
     # Count phenotyped samples
-    pheno_samples=$(tail -n +2 "${ancestry_group}_phenotypes.txt" | wc -l)
-    cases_count=$(awk 'NR>1 && $3==1' "${ancestry_group}_phenotypes.txt" | wc -l)
-    controls_count=$(awk 'NR>1 && $3==0' "${ancestry_group}_phenotypes.txt" | wc -l)
-    missing_count=$(awk 'NR>1 && $3=="NA"' "${ancestry_group}_phenotypes.txt" | wc -l)
+    pheno_samples=$(tail -n +2 "${STEP1_DIR}/${ancestry_group}_phenotypes.txt" | wc -l)
+    cases_count=$(awk 'NR>1 && $3==1' "${STEP1_DIR}/${ancestry_group}_phenotypes.txt" | wc -l)
+    controls_count=$(awk 'NR>1 && $3==0' "${STEP1_DIR}/${ancestry_group}_phenotypes.txt" | wc -l)
+    missing_count=$(awk 'NR>1 && $3=="NA"' "${STEP1_DIR}/${ancestry_group}_phenotypes.txt" | wc -l)
     
     echo "  Phenotype file created: $pheno_samples samples"
     echo "    Cases: $cases_count"
@@ -176,10 +158,10 @@ else
     echo "  WARNING: Case-control file not found" >> "$LOG_FILE"
     
     # Create phenotype file with all missing values
-    echo "FID IID BREAST_CANCER" > "${ancestry_group}_phenotypes.txt"
-    awk '{print $1, $2, "NA"}' "${QC_FILE}.fam" >> "${ancestry_group}_phenotypes.txt"
+    echo "FID IID BREAST_CANCER" > "${STEP1_DIR}/${ancestry_group}_phenotypes.txt"
+    awk '{print $1, $2, "NA"}' "${QC_FILE}.fam" >> "${STEP1_DIR}/${ancestry_group}_phenotypes.txt"
     
-    pheno_samples=$(tail -n +2 "${ancestry_group}_phenotypes.txt" | wc -l)
+    pheno_samples=$(tail -n +2 "${STEP1_DIR}/${ancestry_group}_phenotypes.txt" | wc -l)
     echo "  Phenotype file created: $pheno_samples samples (all missing)"
     echo "  Phenotype file created: $pheno_samples samples (all missing)" >> "$LOG_FILE"
 fi
@@ -191,9 +173,9 @@ echo "Step 5: Creating sample list for REGENIE..."
 echo "Step 5: Creating sample list for REGENIE" >> "$LOG_FILE"
 
 # Create sample list (FID IID format for REGENIE --keep)
-awk '{print $1, $2}' "${QC_FILE}.fam" > "${ancestry_group}_samples.txt"
+awk '{print $1, $2}' "${QC_FILE}.fam" > "${STEP1_DIR}/${ancestry_group}_samples.txt"
 
-sample_list_count=$(wc -l < "${ancestry_group}_samples.txt")
+sample_list_count=$(wc -l < "${STEP1_DIR}/${ancestry_group}_samples.txt")
 echo "  Sample list created: $sample_list_count samples"
 echo "  Sample list created: $sample_list_count samples" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
@@ -203,7 +185,6 @@ echo "========================================="
 echo "PCA AND REGENIE PREP COMPLETE for $ancestry_group"
 echo "========================================="
 echo "Input dataset:        $total_snps SNPs, $total_samples samples"
-echo "LD pruned SNPs:       $pruned_snps SNPs"
 echo "PCA components:       10 PCs"
 echo "Covariate samples:    $cov_samples"
 echo "Phenotype samples:    $pheno_samples"
@@ -215,7 +196,6 @@ echo "========================================="
 # Write final summary to log
 echo "=== FINAL SUMMARY ===" >> "$LOG_FILE"
 echo "Input dataset:        $total_snps SNPs, $total_samples samples" >> "$LOG_FILE"
-echo "LD pruned SNPs:       $pruned_snps SNPs" >> "$LOG_FILE"
 echo "PCA components:       10 PCs" >> "$LOG_FILE"
 echo "Covariate samples:    $cov_samples" >> "$LOG_FILE"
 echo "Phenotype samples:    $pheno_samples" >> "$LOG_FILE"
@@ -227,22 +207,10 @@ echo "Completed: $(date)" >> "$LOG_FILE"
 ### Output file locations ###
 echo ""
 echo "REGENIE-ready files created:"
-echo "Covariates:    ${PCA_DIR}/${ancestry_group}_covariates.txt"
-echo "Phenotypes:    ${PCA_DIR}/${ancestry_group}_phenotypes.txt"
-echo "Sample list:   ${PCA_DIR}/${ancestry_group}_samples.txt"
+echo "Covariates:    ${STEP1_DIR}/${ancestry_group}_covariates.txt"
+echo "Phenotypes:    ${STEP1_DIR}/${ancestry_group}_phenotypes.txt"
+echo "Sample list:   ${STEP1_DIR}/${ancestry_group}_samples.txt"
 echo "Summary log:   ${PCA_DIR}/${ancestry_group}_pca_summary.txt"
 echo ""
 echo "Files are ready for REGENIE Step 1!"
 
-echo ""
-echo "Example REGENIE Step 1 command:" 
-echo "regenie \\"
-echo "  --step 1 \\"
-echo "  --bed ${QC_FILE} \\"
-echo "  --covarFile ${PCA_DIR}/${ancestry_group}_covariates.txt \\"
-echo "  --phenoFile ${PCA_DIR}/${ancestry_group}_phenotypes.txt \\"
-echo "  --bsize 1000 \\"
-echo "  --out ${ancestry_group}_step1"
-
-echo ""
-echo "PCA and REGENIE prep complete for $ancestry_group!"

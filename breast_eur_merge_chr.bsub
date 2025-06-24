@@ -1,0 +1,116 @@
+#!/bin/bash
+#BSUB -J "eur_merge_chr[1-23]"
+#BSUB -o ../log/eur_merge_chr.%J_%I.out
+#BSUB -e ../log/eur_merge_chr.%J_%I.err
+#BSUB -n 16
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 2:00
+
+# Load required modules
+module load bcftools/1.20
+module load htslib/1.20
+module load plink/2.0-20240804
+
+# Set up environment
+WDIR="/project/knathans_tecac/jenny/breast"
+INPUT_DIR="$WDIR/data/imputed/EUR/step2_chunked_pgen"
+MERGED_DIR="$WDIR/data/imputed/EUR/step2_chr_pgen"
+
+cd $WDIR
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$MERGED_DIR"
+
+# Get chromosome number from LSB_JOBINDEX and convert 23 to X
+if [[ $LSB_JOBINDEX -eq 23 ]]; then
+    CHR="X"
+else
+    CHR=$LSB_JOBINDEX
+fi
+
+echo "====== MERGING CHROMOSOME $CHR ANCESTRY SNP CHUNKS ======"
+echo "Start time: $(date)"
+
+# Create file list for this chromosome (looking for final filtered files)
+list_file="${MERGED_DIR}/chr${CHR}_files.txt"
+ls "${INPUT_DIR}"/breast_imputed_eur_chr${CHR}_*_qc.pgen 2>/dev/null | \
+    sed 's/.pgen$//' | sort -V > "$list_file"
+
+# Check if we found any files for this chromosome
+if [[ ! -s "$list_file" ]]; then
+    echo "WARNING: No chunk files found for chromosome $CHR"
+    exit 0
+fi
+
+# Count files found
+file_count=$(wc -l < "$list_file")
+echo "Found $file_count chunk files for chromosome $CHR"
+
+# Output file for this chromosome
+chr_output="${MERGED_DIR}/breast_eur_chr${CHR}"
+
+# If only one chunk, copy it directly
+if [[ $file_count -eq 1 ]]; then
+    echo "Only one chunk found, copying directly..."
+    input_prefix=$(head -n 1 "$list_file")
+    cp "${input_prefix}.pgen" "${chr_output}.pgen"
+    cp "${input_prefix}.pvar" "${chr_output}.pvar"
+    cp "${input_prefix}.psam" "${chr_output}.psam"
+    
+    echo "====== CHROMOSOME $CHR RESULTS ======"
+    printf "%-25s: %s\n" "Chromosome" "$CHR"
+    printf "%-25s: %d\n" "Input chunks" "$file_count"
+    printf "%-25s: %s\n" "PLINK output" "${chr_output}.{pgen,pvar,psam}"
+    
+    # Get variant and sample counts
+    variant_count=$(tail -n +2 "${chr_output}.pvar" | wc -l)
+    sample_count=$(tail -n +2 "${chr_output}.psam" | wc -l)
+    
+    printf "%-25s: %d\n" "Total variants" "$variant_count"
+    printf "%-25s: %d\n" "Samples" "$sample_count"
+    
+    echo "SUCCESS: Chromosome $CHR copied successfully"
+    
+else
+    # Multiple chunks - need to merge
+    echo "Merging $file_count chunks for chromosome $CHR..."
+    
+    plink2 --pmerge-list "$list_file" \
+        --make-pgen \
+        --out "$chr_output" \
+        --threads 16
+    
+    # Check if PLINK merge was successful
+    if [[ $? -eq 0 && -f "${chr_output}.pgen" ]]; then
+        
+        echo "====== CHROMOSOME $CHR RESULTS ======"
+        printf "%-25s: %s\n" "Chromosome" "$CHR"
+        printf "%-25s: %d\n" "Input chunks" "$file_count"
+        printf "%-25s: %s\n" "PLINK output" "${chr_output}.{pgen,pvar,psam}"
+        
+        # Get variant and sample counts from PLINK 2.0 files
+        variant_count=$(tail -n +2 "${chr_output}.pvar" | wc -l)
+        sample_count=$(tail -n +2 "${chr_output}.psam" | wc -l)
+        
+        printf "%-25s: %d\n" "Total variants" "$variant_count"
+        printf "%-25s: %d\n" "Samples" "$sample_count"
+        
+        echo "SUCCESS: Chromosome $CHR merged successfully"
+    else
+        echo "ERROR: Failed to merge chromosome $CHR"
+        exit 1
+    fi
+fi
+
+echo "End time: $(date)"
+echo "====== CHROMOSOME $CHR MERGE COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# Test single chromosome:
+# bsub -hl -J "eur_merge_chr[1]" < breast_eur_merge_chr.bsub
+# 
+# Run all autosomes:
+# bsub -hl < breast_eur_merge_chr.bsub

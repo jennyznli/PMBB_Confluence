@@ -1,0 +1,73 @@
+#!/bin/bash
+#BSUB -J "breast_extract[1-980]"
+#BSUB -o ../log/breast_extract.%J_%I.out
+#BSUB -e ../log/breast_extract.%J_%I.err
+#BSUB -n 1
+#BSUB -M 16000
+#BSUB -R "rusage[mem=8GB]"
+#BSUB -W 2:00
+
+module load bcftools/1.20
+module load htslib/1.20
+module load plink/2.0 
+
+# Set up environment
+IMPUTED_DATA_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
+WDIR="/home/jennyzli/breast"
+OUTPUT_DIR="/home/jennyzli/jenny/breast/data/imputed/breast_chunked_pgen"
+
+cd $WDIR
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$OUTPUT_DIR"
+
+# Get variables from input manifest file and LSB_JOBINDEX (following template exactly)
+input_manifest="${IMPUTED_DATA_DIR}/imputed_variant_chunked_input_manifest.tsv"
+read chrid chunk start_pos stop_pos < <(awk -v i="$LSB_JOBINDEX" '$1 == i {print $2, $3, $4, $5}' "$input_manifest")
+
+# Define file paths
+input_prefix="${IMPUTED_DATA_DIR}/chunked_pgen_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}"
+output_prefix="${OUTPUT_DIR}/breast_imputed_${chrid}_chunk${chunk}"
+temp_prefix="${OUTPUT_DIR}/tmp_breast_imputed_${chrid}_chunk${chunk}.vcf"
+sample_list="/home/jennyzli/jenny/breast/data/case_control_all_pids.txt"
+
+# INFO LOG (following template pattern)
+echo "====== INPUT FILES ======"
+printf "%-20s: %s\n" "input_manifest" "${input_manifest}"
+printf "%-20s: %s\n" "LSB_JOBINDEX" "${LSB_JOBINDEX}"
+printf "%-20s: %s\n" "chrid" "${chrid}"
+printf "%-20s: %s\n" "chunk" "${chunk}"
+printf "%-20s: %s\n" "start_pos" "${start_pos}"
+printf "%-20s: %s\n" "stop_pos" "${stop_pos}"
+printf "%-20s: %s\n" "input_prefix" "${input_prefix}"
+
+echo "====== OUTPUT FILES ======"
+printf "%-20s: %s\n" "output_prefix" "${output_prefix}"
+
+# Check if input files exist
+if [[ ! -f "${input_prefix}.pgen" ]]; then
+    echo "ERROR: PGEN file not found: ${input_prefix}.pgen"
+    exit 1
+fi
+
+if [[ ! -f "$sample_list" ]]; then
+    echo "ERROR: Sample list file not found: $sample_list"
+    exit 1
+fi
+
+# STEP 1: Extract cases/controls
+echo "====== STEP 1: EXTRACTING CASES/CONTROLS ======"
+echo "Processing chunk ${chrid}_${chunk} (${start_pos}-${stop_pos})"
+ 
+plink2 --pfile "$input_prefix" \
+    --keep "$sample_list" \
+    --make-pgen \
+    --out "$output_prefix"
+
+echo "====== JOB COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# submit all chunks:
+# bsub -hl < breast_extract_chunks.bsub

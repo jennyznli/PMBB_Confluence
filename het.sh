@@ -33,10 +33,10 @@ hi=${STAT[1]}
 echo "Heterozygosity thresholds: $lo to $hi"
 
 # Output file: fail list in PLINK format (FID IID) - outputs to current directory
-awk -v low="$lo" -v high="$hi" '$2 < low || $2 > high {print 0, $1}' "$TMP" > "fail_het.txt"
+awk -v low="$lo" -v high="$hi" '$2 < low || $2 > high {print 0, $1}' "$TMP" > "fail-het.txt"
 
 # Report result
-count=$(wc -l < "fail_het.txt")
+count=$(wc -l < "fail-het.txt")
 echo "$count individuals failed heterozygosity filter"
 
 # Cleanup

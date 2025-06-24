@@ -1,0 +1,145 @@
+#!/bin/bash
+#BSUB -J "breast_eur_extract[1-980]"
+#BSUB -o ../log/breast_eur_extract.%J_%I.out
+#BSUB -e ../log/breast_eur_extract.%J_%I.err
+#BSUB -n 1
+#BSUB -M 64000
+#BSUB -R "rusage[mem=32GB]"
+#BSUB -W 2:00
+
+module load bcftools/1.20
+module load htslib/1.20
+module load plink/2.0 
+
+# Set up environment
+IMPUTED_DATA_DIR="/static/PMBB/PMBB-Release-2024-3.0/Imputed"
+WDIR="/project/knathans_tecac/jenny/breast"
+OUTPUT_DIR="$WDIR/data/imputed/EUR/step2_chunked_pgen"
+
+echo "Attempting to change to: $WDIR"
+if ! cd "$WDIR"; then
+    echo "ERROR: Cannot change to directory $WDIR"
+    echo "Current directory: $(pwd)"
+    exit 1
+fi
+echo "Successfully changed to: $(pwd)"
+
+# Create directories if they don't exist
+mkdir -p log
+mkdir -p "$OUTPUT_DIR"
+
+# Get variables from input manifest file and LSB_JOBINDEX
+input_manifest="${IMPUTED_DATA_DIR}/imputed_variant_chunked_input_manifest.tsv"
+read chrid chunk start_pos stop_pos < <(awk -v i="$LSB_JOBINDEX" '$1 == i {print $2, $3, $4, $5}' "$input_manifest")
+
+# Define file paths
+input_prefix="${IMPUTED_DATA_DIR}/chunked_pgen_files/PMBB-Release-2024-3.0_genetic_imputed.${chrid}_chunk${chunk}_${start_pos}_${stop_pos}"
+output_prefix="${OUTPUT_DIR}/breast_imputed_eur_${chrid}_chunk${chunk}"
+final_output_prefix="${OUTPUT_DIR}/breast_imputed_eur_${chrid}_chunk${chunk}_qc"
+sample_list="/project/knathans_tecac/jenny/breast/analysis/ancestry/EUR_breast_pids.txt"
+
+# INFO LOG
+echo "====== INPUT FILES ======"
+printf "%-20s: %s\n" "input_manifest" "${input_manifest}"
+printf "%-20s: %s\n" "LSB_JOBINDEX" "${LSB_JOBINDEX}"
+printf "%-20s: %s\n" "chrid" "${chrid}"
+printf "%-20s: %s\n" "chunk" "${chunk}"
+printf "%-20s: %s\n" "start_pos" "${start_pos}"
+printf "%-20s: %s\n" "stop_pos" "${stop_pos}"
+printf "%-20s: %s\n" "input_prefix" "${input_prefix}"
+
+echo "====== OUTPUT FILES ======"
+printf "%-20s: %s\n" "final_output" "${final_output_prefix}"
+
+# Check if input files exist
+if [[ ! -f "${input_prefix}.pgen" ]]; then
+    echo "ERROR: PGEN file not found: ${input_prefix}.pgen"
+    exit 1
+fi
+
+if [[ ! -f "$sample_list" ]]; then
+    echo "ERROR: Sample list file not found: $sample_list"
+    exit 1
+fi
+
+# STEP 1: Extract cases/controls
+echo "====== STEP 1: EXTRACTING CASES/CONTROLS ======"
+echo "Processing chunk ${chrid}_${chunk} (${start_pos}-${stop_pos})"
+
+# Count initial variants
+initial_count=$(tail -n +2 "${input_prefix}.pvar" | wc -l)
+log_step "Initial" "$initial_count"
+
+plink2 --pfile "$input_prefix" \
+    --keep "$sample_list" \
+    --make-pgen \
+    --out "$output_prefix"
+
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: PLINK2 failed in Step 1" | tee -a "$chunk_log"
+    exit 1
+fi
+
+# Count after sample extraction
+step1_count=$(tail -n +2 "${output_prefix}.pvar" | wc -l)
+sample_count=$(tail -n +2 "${output_prefix}.psam" | wc -l)
+echo "Samples kept: $sample_count" >> "$chunk_log"
+
+# STEP 2: Filter by minor allele count (MAC)
+echo "====== STEP 2: FILTERING BY MINOR ALLELE COUNT ======"
+plink2 --pfile "$output_prefix" \
+    --mac 30 \
+    --make-pgen \
+    --out "${output_prefix}_mac"
+
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: PLINK2 failed in Step 2" | tee -a "$chunk_log"
+    exit 1
+fi
+
+step2_count=$(tail -n +2 "${output_prefix}_mac.pvar" | wc -l)
+
+# STEP 3: Filter by imputation quality (Rsq)
+echo "====== STEP 3: FILTERING BY IMPUTATION QUALITY ======"
+plink2 --pfile "${output_prefix}_mac" \
+    --extract-if-info "R2 >= 0.2" \
+    --make-pgen \
+    --out "${output_prefix}_mac_rsq"
+
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: PLINK2 failed in Step 3" | tee -a "$chunk_log"
+    exit 1
+fi
+
+step3_count=$(tail -n +2 "${output_prefix}_mac_rsq.pvar" | wc -l)
+
+# STEP 4: Filter by variant missingness (final output)
+echo "====== STEP 4: FILTERING BY VARIANT MISSINGNESS ======"
+plink2 --pfile "${output_prefix}_mac_rsq" \
+    --geno 0.05 \
+    --make-pgen \
+    --out "${output_prefix}_qc"
+
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: PLINK2 failed in Step 4" | tee -a "$chunk_log"
+    exit 1
+fi
+
+final_count=$(tail -n +2 "${output_prefix}_qc.pvar" | wc -l)
+
+# Create summary for aggregation
+summary_file="${OUTPUT_DIR}/logs/chunk_${chrid}_${chunk}_summary.tsv"
+echo -e "Chunk\tChr\tChunk_Num\tInitial\tAfter_Extract\tAfter_MAC\tAfter_R2\tAfter_Geno\tSamples" > "$summary_file"
+echo -e "${chrid}_${chunk}\t${chrid}\t${chunk}\t${initial_count}\t${step1_count}\t${step2_count}\t${step3_count}\t${final_count}\t${sample_count}" >> "$summary_file"
+
+echo ""
+echo "Summary data saved to: $summary_file"
+echo "Final QC files: ${output_prefix}_qc.{pgen,pvar,psam}"
+
+# Clean up intermediate files (keep only final _qc files)
+echo "====== CLEANING UP INTERMEDIATE FILES ======"
+rm -f "${output_prefix}.pgen" "${output_prefix}.pvar" "${output_prefix}.psam"
+rm -f "${output_prefix}_mac.pgen" "${output_prefix}_mac.pvar" "${output_prefix}_mac.psam"
+rm -f "${output_prefix}_mac_rsq.pgen" "${output_prefix}_mac_rsq.pvar" "${output_prefix}_mac_rsq.psam"
+
+echo "====== CHUNK ${chrid}_${chunk} COMPLETE ======"

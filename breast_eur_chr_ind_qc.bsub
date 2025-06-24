@@ -1,0 +1,137 @@
+#!/bin/bash
+#BSUB -J "eur_qc_chr[1-23]"
+#BSUB -o ../log/eur_qc_chr.%J_%I.out
+#BSUB -e ../log/eur_qc_chr.%J_%I.err
+#BSUB -n 16
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 2:00
+
+# Load required modules
+module load bcftools/1.20
+module load htslib/1.20
+module load plink/2.0
+
+# Set up environment
+WDIR="/project/knathans_tecac/jenny/breast"
+CHR_DIR="$WDIR/data/imputed/EUR/step2_chr_pgen"
+
+cd $WDIR
+
+# Get chromosome number from LSB_JOBINDEX and convert 23 to X
+if [[ $LSB_JOBINDEX -eq 23 ]]; then
+    CHR="X"
+else
+    CHR=$LSB_JOBINDEX
+fi
+
+echo "====== INDIVIDUAL QC FOR CHROMOSOME $CHR ======"
+echo "Start time: $(date)"
+
+# Define input and output files
+chr_input="${CHR_DIR}/breast_eur_chr${CHR}"
+chr_output="${CHR_DIR}/breast_eur_chr${CHR}_indqc"
+
+# Check if input files exist
+if [[ ! -f "${chr_input}.pgen" ]]; then
+    echo "ERROR: Input PGEN file not found: ${chr_input}.pgen"
+    exit 1
+fi
+
+echo "Processing chromosome $CHR"
+echo "Input: ${chr_input}"
+echo "Output: ${chr_output}"
+
+# Handle sex chromosomes differently
+if [[ $CHR -eq 23 ]]; then
+    echo "====== PROCESSING X CHROMOSOME ======"
+    
+    # For X chromosome, check sex and then apply appropriate filters
+    echo "Step 1: Check sex discrepancies"
+    plink2 --pfile "$chr_input" \
+        --check-sex \
+        --out "${chr_output}_sexcheck"
+    
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: Sex check failed for chromosome X"
+        exit 1
+    fi
+    
+    # Apply individual missingness filter for X chromosome
+    echo "Step 2: Apply individual missingness filter (X chromosome)"
+    plink2 --pfile "$chr_input" \
+        --mind 0.05 \
+        --make-pgen \
+        --out "$chr_output"
+    
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: Individual QC failed for chromosome X"
+        exit 1
+    fi
+    
+elif [[ $CHR -le 22 ]]; then
+    echo "====== PROCESSING AUTOSOME $CHR ======"
+    
+    # For autosomes, just apply individual missingness filter
+    echo "Step 1: Apply individual missingness filter"
+    plink2 --pfile "$chr_input" \
+        --mind 0.05 \
+        --make-pgen \
+        --out "$chr_output"
+    
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: Individual QC failed for chromosome $CHR"
+        exit 1
+    fi
+    
+else
+    echo "ERROR: Invalid chromosome number: $CHR"
+    exit 1
+fi
+
+# Get sample counts
+if [[ -f "${chr_output}.psam" ]]; then
+    initial_samples=$(tail -n +2 "${chr_input}.psam" | wc -l)
+    final_samples=$(tail -n +2 "${chr_output}.psam" | wc -l)
+    removed_samples=$((initial_samples - final_samples))
+    
+    echo "====== INDIVIDUAL QC RESULTS ======"
+    printf "%-20s: %d\n" "Initial samples" "$initial_samples"
+    printf "%-20s: %d\n" "Final samples" "$final_samples"
+    printf "%-20s: %d\n" "Removed samples" "$removed_samples"
+    
+    if [[ $initial_samples -gt 0 ]]; then
+        pct_removed=$(echo "scale=2; $removed_samples * 100 / $initial_samples" | bc -l)
+        printf "%-20s: %.2f%%\n" "Percent removed" "$pct_removed"
+    fi
+    
+    # Get variant count
+    variant_count=$(tail -n +2 "${chr_output}.pvar" | wc -l)
+    printf "%-20s: %d\n" "Variants" "$variant_count"
+    
+    echo ""
+    echo "Output files: ${chr_output}.{pgen,pvar,psam}"
+    
+    # Show file sizes
+    echo "File sizes:"
+    ls -lh "${chr_output}".{pgen,pvar,psam}
+    
+else
+    echo "ERROR: Output files not created properly"
+    exit 1
+fi
+
+echo ""
+echo "End time: $(date)"
+echo "====== CHROMOSOME $CHR INDIVIDUAL QC COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# Test single chromosome:
+# bsub -hl -J "eur_qc_chr[1]" < breast_eur_chr_ind_qc.bsub
+# 
+# Run autosomes only:
+# bsub -hl -J "eur_qc_chr[1-22]" < breast_eur_chr_ind_qc.bsub
+#
+# Run all including X:
+# bsub -hl < breast_eur_chr_ind_qc.bsub

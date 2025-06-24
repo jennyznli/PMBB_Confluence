@@ -1,0 +1,51 @@
+#!/bin/bash
+#BSUB -J "eur_qc_chr[1-23]"
+#BSUB -o ../log/eur_qc_chr.%J_%I.out
+#BSUB -e ../log/eur_qc_chr.%J_%I.err
+#BSUB -n 16
+#BSUB -M 32000
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 2:00
+
+# Load required modules
+module load bcftools/1.20
+module load htslib/1.20
+module load plink/2.0
+
+# Set up environment
+WDIR="/project/knathans_tecac/jenny/breast"
+CHR_DIR="$WDIR/data/imputed/EUR/step2_chr_pgen"
+
+cd $WDIR
+
+# Get chromosome number from LSB_JOBINDEX
+CHR=$LSB_JOBINDEX
+
+# ADJUST FOR SEX CRHOMOSOME 
+
+echo "====== MERGING CHROMOSOME $CHR ANCESTRY SNP CHUNKS ======"
+echo "Start time: $(date)"
+chr_input="${CHR_DIR}/breast_eur_chr${CHR}"
+chr_input="${CHR_DIR}/breast_eur_chr${CHR}"_qc
+
+# check sex 
+plink2 --pfile $chr_input
+	--check-sex
+	--out $chr_input
+
+# check missingness individual elvel 
+plink2 --pfile $chr_input
+	--miss 0.05
+	--make-bed
+	-- out $chr_output
+
+echo "End time: $(date)"
+echo "====== CHROMOSOME $CHR MERGE COMPLETE ======"
+
+# SYNTAX TO SUBMIT JOB
+# ---------------------------
+# Test single chromosome:
+# bsub -hl -J "eur_qc_chr[1]" < breast_eur_qc_chr.bsub
+# 
+# Run all autosomes:
+# bsub -hl < breast_eur_qc_chr.bsub

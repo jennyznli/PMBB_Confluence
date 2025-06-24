@@ -54,7 +54,7 @@ grafanc_check.sh
 grafanc_check_breast.sh
 # seemed alright the ancestry inference, so we can keep going
 
-### COMMON SNPS V1 ###
+### COMMON SNPS ###
 # subset to cases and controls 
 # adds phenotype and sex data
 # check individual missingness 0.05 
@@ -77,33 +77,7 @@ bsub < ancestry_prep_step1.bsub
 # actually perform step 1 bruh 
 bsub < ancestry_step1.bsub
 
-### COMMON SNPS v2 ###
-# QC variant and indviidaul level for europeans
-bash eur_ind_var_qc.sh
+# finally bruh
+bsub < ancestry_step2.bsub 
 
-# pca
-# prep covariates, phenotypes, sample lists
-bsub < eur_prep_step1.bsub
-# use 10 PCs, add batch as covariate ! 
 
-# actual regenie
-bsub < eur_step1.bsub
-
-### STEP 2 ###
-# step 2 prep
-# mac > 30 
-# rsq > 0.2
-# snp missingness 0.05
-bsub < breast_eur_extract_chunks.bsub
-
-# summarize how many snps removed at each chunk
-bash breast_eur_summarize_chunk.sh
-
-# merge all chromosomes
-bsub < breast_eur_merge_chr.bsub
-
-# individual level QC for each chromosome
-# missing individual 0.05 
-bsub < breast_eur_chr_ind_qc.bsub
-
-# perform regenie step 2...  
